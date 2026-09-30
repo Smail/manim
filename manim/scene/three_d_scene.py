@@ -42,6 +42,8 @@ class ThreeDScene(Scene):
         **kwargs,
     ):
         self.ambient_camera_rotation = ambient_camera_rotation
+        self._ambient_rotation_updaters = {"theta": [], "phi": [], "gamma": []}
+        self._3dillusion_updaters = []
         if default_angled_camera_orientation_kwargs is None:
             default_angled_camera_orientation_kwargs = {
                 "phi": 70 * DEGREES,
@@ -123,7 +125,11 @@ class ThreeDScene(Scene):
                     "gamma": self.camera.gamma_tracker,
                 }
                 x: ValueTracker = trackers[about]
-                x.add_updater(lambda m, dt: x.increment_value(rate * dt))
+
+                def updater(m, dt):
+                    x.increment_value(rate * dt)
+
+                x.add_updater(updater)
                 self.add(x)
             elif config.renderer == RendererType.OPENGL:
                 cam: OpenGLCamera = self.camera
@@ -132,8 +138,14 @@ class ThreeDScene(Scene):
                     "phi": cam.increment_phi,
                     "gamma": cam.increment_gamma,
                 }
-                cam.add_updater(lambda m, dt: methods[about](rate * dt))
+                method = methods[about]
+
+                def updater(m, dt):
+                    method(rate * dt)
+
+                cam.add_updater(updater)
                 self.add(self.camera)
+            self._ambient_rotation_updaters[about].append(updater)
         except Exception as e:
             raise ValueError("Invalid ambient rotation angle.") from e
 
@@ -148,10 +160,14 @@ class ThreeDScene(Scene):
                     "gamma": self.camera.gamma_tracker,
                 }
                 x: ValueTracker = trackers[about]
-                x.clear_updaters()
-                self.remove(x)
+                for updater in self._ambient_rotation_updaters[about]:
+                    x.remove_updater(updater)
+                if not x.get_updaters():
+                    self.remove(x)
             elif config.renderer == RendererType.OPENGL:
-                self.camera.clear_updaters()
+                for updater in self._ambient_rotation_updaters[about]:
+                    self.camera.remove_updater(updater)
+            self._ambient_rotation_updaters[about] = []
         except Exception as e:
             raise ValueError("Invalid ambient rotation angle.") from e
 
@@ -176,37 +192,69 @@ class ThreeDScene(Scene):
             The azimutal angle the camera should move around. Defaults
             to the current theta angle.
         """
-        if origin_theta is None:
-            origin_theta = self.renderer.camera.theta_tracker.get_value()
-        if origin_phi is None:
-            origin_phi = self.renderer.camera.phi_tracker.get_value()
+        if config.renderer == RendererType.CAIRO:
+            if origin_theta is None:
+                origin_theta = self.renderer.camera.theta_tracker.get_value()
+            if origin_phi is None:
+                origin_phi = self.renderer.camera.phi_tracker.get_value()
 
-        val_tracker_theta = ValueTracker(0)
+            val_tracker_theta = ValueTracker(0)
 
-        def update_theta(m, dt):
-            val_tracker_theta.increment_value(dt * rate)
-            val_for_left_right = 0.2 * np.sin(val_tracker_theta.get_value())
-            return m.set_value(origin_theta + val_for_left_right)
+            def update_theta(m, dt):
+                val_tracker_theta.increment_value(dt * rate)
+                val_for_left_right = 0.2 * np.sin(val_tracker_theta.get_value())
+                return m.set_value(origin_theta + val_for_left_right)
 
-        self.renderer.camera.theta_tracker.add_updater(update_theta)
-        self.add(self.renderer.camera.theta_tracker)
+            self.renderer.camera.theta_tracker.add_updater(update_theta)
+            self.add(self.renderer.camera.theta_tracker)
 
-        val_tracker_phi = ValueTracker(0)
+            val_tracker_phi = ValueTracker(0)
 
-        def update_phi(m, dt):
-            val_tracker_phi.increment_value(dt * rate)
-            val_for_up_down = 0.1 * np.cos(val_tracker_phi.get_value()) - 0.1
-            return m.set_value(origin_phi + val_for_up_down)
+            def update_phi(m, dt):
+                val_tracker_phi.increment_value(dt * rate)
+                val_for_up_down = 0.1 * np.cos(val_tracker_phi.get_value()) - 0.1
+                return m.set_value(origin_phi + val_for_up_down)
 
-        self.renderer.camera.phi_tracker.add_updater(update_phi)
-        self.add(self.renderer.camera.phi_tracker)
+            self.renderer.camera.phi_tracker.add_updater(update_phi)
+            self.add(self.renderer.camera.phi_tracker)
+            self._3dillusion_updaters += [update_theta, update_phi]
+        elif config.renderer == RendererType.OPENGL:
+            cam: OpenGLCamera = self.camera
+            if origin_theta is None:
+                origin_theta = cam.euler_angles[0]
+            if origin_phi is None:
+                origin_phi = cam.euler_angles[1]
+
+            val_tracker = ValueTracker(0)
+
+            def update_angles(m, dt):
+                val_tracker.increment_value(dt * rate)
+                val_for_left_right = 0.2 * np.sin(val_tracker.get_value())
+                val_for_up_down = 0.1 * np.cos(val_tracker.get_value()) - 0.1
+                m.set_euler_angles(
+                    theta=origin_theta + val_for_left_right,
+                    phi=origin_phi + val_for_up_down,
+                )
+
+            cam.add_updater(update_angles)
+            self.add(self.camera)
+            self._3dillusion_updaters.append(update_angles)
 
     def stop_3dillusion_camera_rotation(self):
         """This method stops all illusion camera rotations."""
-        self.renderer.camera.theta_tracker.clear_updaters()
-        self.remove(self.renderer.camera.theta_tracker)
-        self.renderer.camera.phi_tracker.clear_updaters()
-        self.remove(self.renderer.camera.phi_tracker)
+        if config.renderer == RendererType.CAIRO:
+            for tracker in [
+                self.renderer.camera.theta_tracker,
+                self.renderer.camera.phi_tracker,
+            ]:
+                for updater in self._3dillusion_updaters:
+                    tracker.remove_updater(updater)
+                if not tracker.get_updaters():
+                    self.remove(tracker)
+        elif config.renderer == RendererType.OPENGL:
+            for updater in self._3dillusion_updaters:
+                self.camera.remove_updater(updater)
+        self._3dillusion_updaters = []
 
     def move_camera(
         self,
